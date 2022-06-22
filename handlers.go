@@ -7,6 +7,7 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/restic/rest-server/quota"
 	"github.com/restic/rest-server/repo"
@@ -14,24 +15,25 @@ import (
 
 // Server encapsulates the rest-server's settings and repo management logic
 type Server struct {
-	Path             string
-	HtpasswdPath     string
-	Listen           string
-	Log              string
-	CPUProfile       string
-	TLSCACert        string
-	TLSKey           string
-	TLSCert          string
-	TLS              bool
-	NoAuth           bool
-	AppendOnly       bool
-	PrivateRepos     bool
-	Prometheus       bool
-	PrometheusNoAuth bool
-	Debug            bool
-	MaxRepoSize      int64
-	PanicOnError     bool
-	NoVerifyUpload   bool
+	Path              string
+	HtpasswdPath      string
+	Listen            string
+	Log               string
+	CPUProfile        string
+	TLSCACert         string
+	TLSKey            string
+	TLSCert           string
+	TLS               bool
+	NoAuth            bool
+	AppendOnly        bool
+	PrivateRepos      bool
+	Prometheus        bool
+	PrometheusNoAuth  bool
+	Debug             bool
+	MaxRepoSize       int64
+	PanicOnError      bool
+	NoVerifyUpload    bool
+	InactivityTimeout time.Duration
 
 	htpasswdFile *HtpasswdFile
 	quotaManager *quota.Manager

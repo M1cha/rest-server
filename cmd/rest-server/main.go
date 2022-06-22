@@ -1,19 +1,23 @@
 package main
 
 import (
+	"context"
 	"crypto/tls"
 	"crypto/x509"
 	"errors"
 	"fmt"
 	"io/ioutil"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
 	"runtime"
 	"runtime/pprof"
+	"sync"
 	"syscall"
+	"time"
 
 	restserver "github.com/restic/rest-server"
 	"github.com/spf13/cobra"
@@ -58,6 +62,8 @@ func init() {
 	flags.BoolVar(&server.PrivateRepos, "private-repos", server.PrivateRepos, "users can only access their private repo")
 	flags.BoolVar(&server.Prometheus, "prometheus", server.Prometheus, "enable Prometheus metrics")
 	flags.BoolVar(&server.PrometheusNoAuth, "prometheus-no-auth", server.PrometheusNoAuth, "disable auth for Prometheus /metrics endpoint")
+	flags.DurationVar(&server.InactivityTimeout, "inactivity-timeout", server.InactivityTimeout, "stop server when inactive")
+
 }
 
 var version = "0.11.0"
@@ -80,6 +86,44 @@ func tlsSettings() (bool, string, string, error) {
 		cert = filepath.Join(server.Path, "public_key")
 	}
 	return server.TLS, key, cert, nil
+}
+
+type IdleTracker struct {
+	mu     sync.Mutex
+	active map[net.Conn]bool
+	idle   time.Duration
+	timer  *time.Timer
+}
+
+func NewIdleTracker(idle time.Duration) *IdleTracker {
+	return &IdleTracker{
+		active: make(map[net.Conn]bool),
+		idle:   idle,
+		timer:  time.NewTimer(idle),
+	}
+}
+
+func (t *IdleTracker) ConnState(conn net.Conn, state http.ConnState) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	oldActive := len(t.active)
+	switch state {
+	case http.StateNew, http.StateActive, http.StateHijacked:
+		t.active[conn] = true
+		if oldActive == 0 {
+			t.timer.Stop()
+		}
+	case http.StateIdle, http.StateClosed:
+		delete(t.active, conn)
+		if oldActive > 0 && len(t.active) == 0 {
+			t.timer.Reset(t.idle)
+		}
+	}
+}
+
+func (t *IdleTracker) Done() <-chan time.Time {
+	return t.timer.C
 }
 
 func runRoot(cmd *cobra.Command, args []string) error {
@@ -140,14 +184,28 @@ func runRoot(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("unable to listen: %w", err)
 	}
 
+	httpServer := &http.Server{
+		Handler: handler,
+	}
+
+	if server.InactivityTimeout > 0 {
+		log.Printf("Set inactivity timeout to %v", server.InactivityTimeout)
+
+		idle := NewIdleTracker(server.InactivityTimeout)
+		httpServer.ConnState = idle.ConnState
+
+		go func() {
+			<-idle.Done()
+			if err := httpServer.Shutdown(context.Background()); err != nil {
+				log.Fatalf("error shutting down: %v\n", err)
+			}
+		}()
+	}
+
 	if !enabledTLS {
-		err = http.Serve(listener, handler)
+		err = httpServer.Serve(listener)
 	} else {
 		log.Printf("TLS enabled, private key %s, pubkey %v", privateKey, publicKey)
-
-		httpServer := &http.Server{
-			Handler: handler,
-		}
 
 		if server.TLSCACert != "" {
 			log.Printf("TLS Client Authentication enabled, CA cert %s", server.TLSCACert)
@@ -167,6 +225,10 @@ func runRoot(cmd *cobra.Command, args []string) error {
 		}
 
 		err = httpServer.ServeTLS(listener, publicKey, privateKey)
+	}
+
+	if err == http.ErrServerClosed {
+		err = nil
 	}
 
 	return err
