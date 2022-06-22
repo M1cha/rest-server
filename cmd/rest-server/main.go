@@ -17,6 +17,7 @@ import (
 	"runtime/pprof"
 	"sync"
 	"syscall"
+	"time"
 
 	restserver "github.com/restic/rest-server"
 	"github.com/spf13/cobra"
@@ -77,6 +78,7 @@ func newRestServerApp() *restServerApp {
 	flags.BoolVar(&rv.Server.Prometheus, "prometheus", rv.Server.Prometheus, "enable Prometheus metrics")
 	flags.BoolVar(&rv.Server.PrometheusNoAuth, "prometheus-no-auth", rv.Server.PrometheusNoAuth, "disable auth for Prometheus /metrics endpoint")
 	flags.BoolVar(&rv.Server.GroupAccessibleRepos, "group-accessible-repos", rv.Server.GroupAccessibleRepos, "let filesystem group be able to access repo files")
+	flags.DurationVar(&rv.Server.InactivityTimeout, "inactivity-timeout", rv.Server.InactivityTimeout, "stop server when inactive")
 
 	return rv
 }
@@ -109,6 +111,44 @@ func (app *restServerApp) ListenerAddress() net.Addr {
 	app.listenerAddressMu.Lock()
 	defer app.listenerAddressMu.Unlock()
 	return app.listenerAddress
+}
+
+type IdleTracker struct {
+	mu     sync.Mutex
+	active map[net.Conn]bool
+	idle   time.Duration
+	timer  *time.Timer
+}
+
+func NewIdleTracker(idle time.Duration) *IdleTracker {
+	return &IdleTracker{
+		active: make(map[net.Conn]bool),
+		idle:   idle,
+		timer:  time.NewTimer(idle),
+	}
+}
+
+func (t *IdleTracker) ConnState(conn net.Conn, state http.ConnState) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	oldActive := len(t.active)
+	switch state {
+	case http.StateNew, http.StateActive, http.StateHijacked:
+		t.active[conn] = true
+		if oldActive == 0 {
+			t.timer.Stop()
+		}
+	case http.StateIdle, http.StateClosed:
+		delete(t.active, conn)
+		if oldActive > 0 && len(t.active) == 0 {
+			t.timer.Reset(t.idle)
+		}
+	}
+}
+
+func (t *IdleTracker) Done() <-chan time.Time {
+	return t.timer.C
 }
 
 func (app *restServerApp) runRoot(_ *cobra.Command, _ []string) error {
@@ -219,6 +259,20 @@ func (app *restServerApp) runRoot(_ *cobra.Command, _ []string) error {
 	srv := &http.Server{
 		Handler:   handler,
 		TLSConfig: tlscfg,
+	}
+
+	if app.Server.InactivityTimeout > 0 {
+		log.Printf("Set inactivity timeout to %v", app.Server.InactivityTimeout)
+
+		idle := NewIdleTracker(app.Server.InactivityTimeout)
+		srv.ConnState = idle.ConnState
+
+		go func() {
+			<-idle.Done()
+			if err := srv.Shutdown(context.Background()); err != nil {
+				log.Fatalf("error shutting down: %v\n", err)
+			}
+		}()
 	}
 
 	// run server in background
