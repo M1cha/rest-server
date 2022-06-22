@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/restic/rest-server/quota"
 	"github.com/restic/rest-server/repo"
@@ -36,6 +37,7 @@ type Server struct {
 	PanicOnError         bool
 	NoVerifyUpload       bool
 	GroupAccessibleRepos bool
+	InactivityTimeout    time.Duration
 
 	htpasswdFile *HtpasswdFile
 	quotaManager *quota.Manager
