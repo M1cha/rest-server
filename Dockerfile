@@ -1,4 +1,4 @@
-FROM golang:alpine AS builder
+FROM docker.io/golang:alpine AS builder
 
 ENV CGO_ENABLED 0
 
@@ -9,7 +9,7 @@ RUN go build -o rest-server ./cmd/rest-server
 
 
 
-FROM alpine
+FROM docker.io/alpine
 
 ENV DATA_DIRECTORY /data
 ENV PASSWORD_FILE /data/.htpasswd
